@@ -155,64 +155,29 @@ export class ToolHandlers {
 
             // Validate splitter parameter
             if (splitterType !== 'ast' && splitterType !== 'langchain') {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Invalid splitter type '${splitterType}'. Must be 'ast' or 'langchain'.`
-                    }],
-                    isError: true
-                };
-            }
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
-
-            // Validate path exists
-            if (!fs.existsSync(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
-                    }],
-                    isError: true
-                };
+                return this.createErrorResponse(`Error: Invalid splitter type '${splitterType}'. Must be 'ast' or 'langchain'.`);
             }
 
-            // Check if it's a directory
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isDirectory()) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' is not a directory`
-                    }],
-                    isError: true
-                };
+            // Validate codebase path
+            const pathValidation = this.validateCodebasePath(codebasePath);
+            if (!pathValidation.success) {
+                return pathValidation.error;
+            }
+            const absolutePath = pathValidation.absolutePath!;
+
+            // Check indexing status
+            const { isIndexed, isIndexing } = this.getIndexingStatus(absolutePath);
+            
+            if (isIndexing) {
+                return this.createErrorResponse(`Codebase '${absolutePath}' is already being indexed in the background. Please wait for completion.`);
             }
 
-            // Check if already indexing
-            if (this.snapshotManager.getIndexingCodebases().includes(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Codebase '${absolutePath}' is already being indexed in the background. Please wait for completion.`
-                    }],
-                    isError: true
-                };
-            }
-
-            // Check if already indexed (unless force is true)
-            if (!forceReindex && this.snapshotManager.getIndexedCodebases().includes(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Codebase '${absolutePath}' is already indexed. Use force=true to re-index.`
-                    }],
-                    isError: true
-                };
+            if (!forceReindex && isIndexed) {
+                return this.createErrorResponse(`Codebase '${absolutePath}' is already indexed. Use force=true to re-index.`);
             }
 
             // If force reindex and codebase is already indexed, remove it from indexed list
-            if (forceReindex && this.snapshotManager.getIndexedCodebases().includes(absolutePath)) {
+            if (forceReindex && isIndexed) {
                 console.log(`[FORCE-REINDEX] 🔄 Removing '${absolutePath}' from indexed list for re-indexing`);
                 this.snapshotManager.removeIndexedCodebase(absolutePath);
             }
@@ -234,33 +199,17 @@ export class ToolHandlers {
                 console.log(`[INDEX-VALIDATION] ✅  Collection creation validation completed`);
 
             } catch (validationError: any) {
-                const errorMessage = typeof validationError === 'string' ? validationError :
-                    (validationError instanceof Error ? validationError.message : String(validationError));
-
-                if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
+                // Check for collection limit error first
+                const collectionLimitResponse = this.handleCollectionLimitError(validationError);
+                if (collectionLimitResponse) {
                     console.error(`[INDEX-VALIDATION] ❌ Collection limit validation failed: ${absolutePath}`);
-
-                    // CRITICAL: Immediately return the COLLECTION_LIMIT_MESSAGE to MCP client
-                    return {
-                        content: [{
-                            type: "text",
-                            text: COLLECTION_LIMIT_MESSAGE
-                        }],
-                        isError: true
-                    };
-                } else {
-                    // Handle other collection creation errors
-                    console.error(`[INDEX-VALIDATION] ❌ Collection creation validation failed:`, validationError);
-                    const errorMessage = extractErrorMessage(validationError);
-                    
-                    return {
-                        content: [{
-                            type: "text",
-                            text: `Error validating collection creation: ${errorMessage}`
-                        }],
-                        isError: true
-                    };
+                    return collectionLimitResponse;
                 }
+
+                // Handle other collection creation errors
+                console.error(`[INDEX-VALIDATION] ❌ Collection creation validation failed:`, validationError);
+                const errorMessage = extractErrorMessage(validationError);
+                return this.createErrorResponse(`Error validating collection creation: ${errorMessage}`);
             }
 
             // Add custom extensions if provided
@@ -285,37 +234,22 @@ export class ToolHandlers {
             // Start background indexing - now safe to proceed
             this.startBackgroundIndexing(absolutePath, forceReindex, splitterType);
 
-            const pathInfo = codebasePath !== absolutePath
-                ? `\nNote: Input path '${codebasePath}' was resolved to absolute path '${absolutePath}'`
-                : '';
-
+            const pathInfo = this.generatePathInfoMessage(codebasePath, absolutePath);
             const extensionInfo = customFileExtensions.length > 0
                 ? `\nUsing ${customFileExtensions.length} custom extensions: ${customFileExtensions.join(', ')}`
                 : '';
-
             const ignoreInfo = customIgnorePatterns.length > 0
                 ? `\nUsing ${customIgnorePatterns.length} custom ignore patterns: ${customIgnorePatterns.join(', ')}`
                 : '';
 
-            return {
-                content: [{
-                    type: "text",
-                    text: `Started background indexing for codebase '${absolutePath}' using ${splitterType.toUpperCase()} splitter.${pathInfo}${extensionInfo}${ignoreInfo}\n\nIndexing is running in the background. You can search the codebase while indexing is in progress, but results may be incomplete until indexing completes.`
-                }]
-            };
+            return this.createSuccessResponse(`Started background indexing for codebase '${absolutePath}' using ${splitterType.toUpperCase()} splitter.${pathInfo}${extensionInfo}${ignoreInfo}\n\nIndexing is running in the background. You can search the codebase while indexing is in progress, but results may be incomplete until indexing completes.`);
 
         } catch (error: any) {
             // Enhanced error handling to prevent MCP service crash
             console.error('Error in handleIndexCodebase:', error);
-
+            
             // Ensure we always return a proper MCP response, never throw
-            return {
-                content: [{
-                    type: "text",
-                    text: `Error starting indexing: ${error.message || error}`
-                }],
-                isError: true
-            };
+            return this.createErrorResponse(`Error starting indexing: ${extractErrorMessage(error)}`);
         }
     }
 
@@ -412,37 +346,19 @@ export class ToolHandlers {
             // Sync indexed codebases from cloud first
             await this.syncIndexedCodebasesFromCloud();
 
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
-
-            // Validate path exists
-            if (!fs.existsSync(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
-                    }],
-                    isError: true
-                };
+            // Validate codebase path
+            const pathValidation = this.validateCodebasePath(codebasePath);
+            if (!pathValidation.success) {
+                return pathValidation.error;
             }
-
-            // Check if it's a directory
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isDirectory()) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' is not a directory`
-                    }],
-                    isError: true
-                };
-            }
+            const absolutePath = pathValidation.absolutePath!;
 
             trackCodebasePath(absolutePath);
 
             // Check if this codebase is indexed or being indexed
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            let isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+            const indexingStatus = this.getIndexingStatus(absolutePath);
+            let isIndexed = indexingStatus.isIndexed;
+            let isIndexing = indexingStatus.isIndexing;
 
             if (!isIndexed && !isIndexing) {
                 console.log(`[SEARCH] Codebase '${absolutePath}' is not indexed - starting bulletproof auto-indexing`);
@@ -762,44 +678,18 @@ export class ToolHandlers {
         }
 
         try {
-            // Force absolute path resolution - warn if relative path provided
-            const absolutePath = ensureAbsolutePath(codebasePath);
-
-            // Validate path exists
-            if (!fs.existsSync(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
-                    }],
-                    isError: true
-                };
+            // Validate codebase path
+            const pathValidation = this.validateCodebasePath(codebasePath);
+            if (!pathValidation.success) {
+                return pathValidation.error;
             }
-
-            // Check if it's a directory
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isDirectory()) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' is not a directory`
-                    }],
-                    isError: true
-                };
-            }
+            const absolutePath = pathValidation.absolutePath!;
 
             // Check if this codebase is indexed or being indexed
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
-
+            const { isIndexed, isIndexing } = this.getIndexingStatus(absolutePath);
+            
             if (!isIndexed && !isIndexing) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Codebase '${absolutePath}' is not indexed or being indexed.`
-                    }],
-                    isError: true
-                };
+                return this.createErrorResponse(`Error: Codebase '${absolutePath}' is not indexed or being indexed.`);
             }
 
             console.log(`[CLEAR] Clearing codebase: ${absolutePath}`);
@@ -808,15 +698,9 @@ export class ToolHandlers {
                 await this.context.clearIndex(absolutePath);
                 console.log(`[CLEAR] Successfully cleared index for: ${absolutePath}`);
             } catch (error: any) {
-                const errorMsg = `Failed to clear ${absolutePath}: ${error.message}`;
+                const errorMsg = `Failed to clear ${absolutePath}: ${extractErrorMessage(error)}`;
                 console.error(`[CLEAR] ${errorMsg}`);
-                return {
-                    content: [{
-                        type: "text",
-                        text: errorMsg
-                    }],
-                    isError: true
-                };
+                return this.createErrorResponse(errorMsg);
             }
 
             // Remove the cleared codebase from both lists
@@ -838,35 +722,15 @@ export class ToolHandlers {
                 resultText += `\n${remainingIndexed} other indexed codebase(s) and ${remainingIndexing} indexing codebase(s) remain`;
             }
 
-            return {
-                content: [{
-                    type: "text",
-                    text: resultText
-                }]
-            };
+            return this.createSuccessResponse(resultText);
         } catch (error) {
-            // Check if this is the collection limit error
-            // Handle both direct string throws and Error objects containing the message
-            const errorMessage = extractErrorMessage(error);
-
-            if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
-                // Return the collection limit message as a successful response
-                // This ensures LLM treats it as final answer, not as retryable error
-                return {
-                    content: [{
-                        type: "text",
-                        text: COLLECTION_LIMIT_MESSAGE
-                    }]
-                };
+            // Check for collection limit error first
+            const collectionLimitResponse = this.handleCollectionLimitError(error);
+            if (collectionLimitResponse) {
+                return collectionLimitResponse;
             }
 
-            return {
-                content: [{
-                    type: "text",
-                    text: `Error clearing index: ${errorMessage}`
-                }],
-                isError: true
-            };
+            return this.createErrorResponse(`Error clearing index: ${extractErrorMessage(error)}`);
         }
     }
 
@@ -874,35 +738,15 @@ export class ToolHandlers {
         const { path: codebasePath } = args;
 
         try {
-            // Force absolute path resolution
-            const absolutePath = ensureAbsolutePath(codebasePath);
-
-            // Validate path exists
-            if (!fs.existsSync(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`
-                    }],
-                    isError: true
-                };
+            // Validate codebase path
+            const pathValidation = this.validateCodebasePath(codebasePath);
+            if (!pathValidation.success) {
+                return pathValidation.error;
             }
-
-            // Check if it's a directory
-            const stat = fs.statSync(absolutePath);
-            if (!stat.isDirectory()) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Error: Path '${absolutePath}' is not a directory`
-                    }],
-                    isError: true
-                };
-            }
+            const absolutePath = pathValidation.absolutePath!;
 
             // Check indexing status
-            const isIndexed = this.snapshotManager.getIndexedCodebases().includes(absolutePath);
-            const isIndexing = this.snapshotManager.getIndexingCodebases().includes(absolutePath);
+            const { isIndexed, isIndexing } = this.getIndexingStatus(absolutePath);
             const indexingProgress = this.snapshotManager.getIndexingProgress(absolutePath);
 
             let statusMessage = '';
@@ -923,25 +767,11 @@ export class ToolHandlers {
                 statusMessage = `❌ Codebase '${absolutePath}' is not indexed. Please use the index_codebase tool to index it first.`;
             }
 
-            const pathInfo = codebasePath !== absolutePath
-                ? `\nNote: Input path '${codebasePath}' was resolved to absolute path '${absolutePath}'`
-                : '';
-
-            return {
-                content: [{
-                    type: "text",
-                    text: statusMessage + pathInfo
-                }]
-            };
+            const pathInfo = this.generatePathInfoMessage(codebasePath, absolutePath);
+            return this.createSuccessResponse(statusMessage + pathInfo);
 
         } catch (error: any) {
-            return {
-                content: [{
-                    type: "text",
-                    text: `Error getting indexing status: ${error.message || error}`
-                }],
-                isError: true
-            };
+            return this.createErrorResponse(`Error getting indexing status: ${extractErrorMessage(error)}`);
         }
     }
 
@@ -1101,5 +931,98 @@ export class ToolHandlers {
         guidance += `• Contact support if issues persist\n`;
         
         return guidance;
+    }
+
+    /**
+     * Utility functions for reducing code duplication
+     */
+
+    /**
+     * Validates codebase path and returns standardized error responses
+     */
+    private validateCodebasePath(codebasePath: string): { success: boolean; absolutePath?: string; error?: any } {
+        try {
+            // Force absolute path resolution
+            const absolutePath = ensureAbsolutePath(codebasePath);
+
+            // Validate path exists
+            if (!fs.existsSync(absolutePath)) {
+                return {
+                    success: false,
+                    error: this.createErrorResponse(`Error: Path '${absolutePath}' does not exist. Original input: '${codebasePath}'`)
+                };
+            }
+
+            // Check if it's a directory
+            const stat = fs.statSync(absolutePath);
+            if (!stat.isDirectory()) {
+                return {
+                    success: false,
+                    error: this.createErrorResponse(`Error: Path '${absolutePath}' is not a directory`)
+                };
+            }
+
+            return { success: true, absolutePath };
+        } catch (error: any) {
+            return {
+                success: false,
+                error: this.createErrorResponse(`Error validating path: ${extractErrorMessage(error)}`)
+            };
+        }
+    }
+
+    /**
+     * Creates standardized error response objects
+     */
+    private createErrorResponse(message: string): any {
+        return {
+            content: [{
+                type: "text",
+                text: message
+            }],
+            isError: true
+        };
+    }
+
+    /**
+     * Creates standardized success response objects
+     */
+    private createSuccessResponse(message: string): any {
+        return {
+            content: [{
+                type: "text",
+                text: message
+            }]
+        };
+    }
+
+    /**
+     * Gets indexing status for a codebase
+     */
+    private getIndexingStatus(absolutePath: string): { isIndexed: boolean; isIndexing: boolean } {
+        return {
+            isIndexed: this.snapshotManager.getIndexedCodebases().includes(absolutePath),
+            isIndexing: this.snapshotManager.getIndexingCodebases().includes(absolutePath)
+        };
+    }
+
+    /**
+     * Handles collection limit errors with standardized response
+     */
+    private handleCollectionLimitError(error: any): any | null {
+        const errorMessage = extractErrorMessage(error);
+        if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
+            return this.createSuccessResponse(`🔧 **Information**\n\n${COLLECTION_LIMIT_MESSAGE}\n\n💡 **This is informational, not an error** - your vector database has reached its collection limit.`);
+        }
+        return null; // Not a collection limit error
+    }
+
+    /**
+     * Generates path info message when original path differs from resolved path
+     */
+    private generatePathInfoMessage(originalPath: string, absolutePath: string): string {
+        return originalPath !== absolutePath
+            ? `\nNote: Input path '${originalPath}' was resolved to absolute path '${absolutePath}'`
+            : '';
     }
 } 
