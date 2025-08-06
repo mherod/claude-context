@@ -24,6 +24,26 @@ export function ensureAbsolutePath(inputPath: string): string {
     return resolved;
 }
 
+/**
+ * Extracts a meaningful error message from any error object
+ */
+export function extractErrorMessage(error: any): string {
+    if (typeof error === 'string') {
+        return error;
+    } else if (error instanceof Error) {
+        return error.message;
+    } else if (error && typeof error === 'object') {
+        // Try common error properties
+        return error.message || 
+               error.error || 
+               error.statusText ||
+               error.data ||
+               JSON.stringify(error);
+    } else {
+        return String(error);
+    }
+}
+
 export function trackCodebasePath(codebasePath: string): void {
     const absolutePath = ensureAbsolutePath(codebasePath);
     console.log(`[TRACKING] Tracked codebase path: ${absolutePath} (not marked as indexed)`);

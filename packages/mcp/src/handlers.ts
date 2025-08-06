@@ -3,7 +3,8 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
-import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
+import { ensureAbsolutePath, truncateContent, trackCodebasePath, extractErrorMessage } from "./utils.js";
+
 
 export class ToolHandlers {
     private context: Context;
@@ -250,10 +251,12 @@ export class ToolHandlers {
                 } else {
                     // Handle other collection creation errors
                     console.error(`[INDEX-VALIDATION] ❌ Collection creation validation failed:`, validationError);
+                    const errorMessage = extractErrorMessage(validationError);
+                    
                     return {
                         content: [{
                             type: "text",
-                            text: `Error validating collection creation: ${validationError.message || validationError}`
+                            text: `Error validating collection creation: ${errorMessage}`
                         }],
                         isError: true
                     };
@@ -516,7 +519,7 @@ export class ToolHandlers {
         } catch (error) {
             // Check if this is the collection limit error
             // Handle both direct string throws and Error objects containing the message
-            const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+            const errorMessage = extractErrorMessage(error);
 
             if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
                 // Return the collection limit message as a successful response
@@ -637,7 +640,7 @@ export class ToolHandlers {
         } catch (error) {
             // Check if this is the collection limit error
             // Handle both direct string throws and Error objects containing the message
-            const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+            const errorMessage = extractErrorMessage(error);
 
             if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
                 // Return the collection limit message as a successful response
