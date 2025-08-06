@@ -96,14 +96,18 @@ Index a codebase directory to enable semantic search using a configurable code s
 
 
         const search_description = `
-Search the indexed codebase using natural language queries within a specified absolute path.
+Search the codebase using natural language queries within a specified absolute path.
 
 ⚠️ **IMPORTANT**:
 - You MUST provide an absolute path.
 
 ✨ **Usage Guidance**:
-- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
-- You can then use the index_codebase tool to index the codebase before searching again.
+- If the codebase is not indexed, this tool will automatically start indexing it in the background.
+- Auto-indexing uses default settings (AST splitter, standard file extensions, gitignore patterns).
+- Use wait=true to wait up to 60 seconds for indexing completion before searching (provides more complete results).
+- After 60 seconds, partial results are returned with a note about ongoing indexing.
+- Without wait=true, partial results are returned immediately if indexing is in progress.
+- For custom indexing options (custom extensions, ignore patterns), use the index_codebase tool manually first.
 `;
 
         // Define available tools
@@ -170,6 +174,11 @@ Search the indexed codebase using natural language queries within a specified ab
                                     description: "Maximum number of results to return",
                                     default: 10,
                                     maximum: 50
+                                },
+                                wait: {
+                                    type: "boolean",
+                                    description: "Wait up to 60 seconds for indexing to complete before searching. After timeout, returns partial results with ongoing indexing note.",
+                                    default: false
                                 }
                             },
                             required: ["path", "query"]
